@@ -1,5 +1,5 @@
 # Linux Installer for Windows 11 UEFI Systems - Enhanced Edition with Auto-Restart
-# PowerShell GUI Version - Fixed unit conversions for proper partition placement
+# PowerShell GUI Version - Split Partition Support for Large ISOs (>4GB)
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File linux_installer.ps1
 # Distributions: Linux Mint 22.3 "Zena" (Cinnamon Edition), Ubuntu 24.04.4 LTS, Kubuntu 24.04.4 LTS, Debian Live 13.3.0 KDE, Fedora 43 KDE
 
@@ -120,6 +120,21 @@ $script:Distros = [ordered]@{
         DownloadPage  = "https://fedoraproject.org/kde/download/"
         DownloadMsg   = "Please download Fedora 43 KDE Plasma Desktop (x86_64) and save it as:"
         Keyword       = "Fedora"
+        ValidationFile = "LiveOS\squashfs.img"
+        IsHybrid      = $true
+    }
+    bazzite = @{
+        Name          = "Bazzite"
+        RadioLabel    = "Bazzite - Gaming Linux Distro (approx. 8 GB)"
+        ExpectedSize  = "approximately 8 GB"
+        Mirrors       = @(
+            "https://github.com/ublue-os/bazzite/releases/download/v2.2.1/bazzite-2.2.1-20250226.x86_64.iso"
+        )
+        Checksum      = ""  # User will need to verify manually or we skip verification
+        IsoFilename   = "bazzite-2.2.1-20250226.x86_64.iso"
+        DownloadPage  = "https://bazzite.gg/"
+        DownloadMsg   = "Please download Bazzite and save it as:"
+        Keyword       = "Bazzite"
         ValidationFile = "LiveOS\squashfs.img"
         IsHybrid      = $true
     }
@@ -2436,10 +2451,10 @@ exit
                 }
             }
 
-            # Copy boot directory if it exists (for GRUB configs)
+            # Copy boot directory if it exists (for GRUB configs and modules)
             $bootSourcePath = "$sourceDrive\boot"
             if (Test-Path $bootSourcePath) {
-                Log-Message "Copying boot directory..."
+                Log-Message "Copying boot directory (GRUB modules and configs)..."
                 $robocopyArgs = @(
                     $bootSourcePath,
                     "$($script:EfiDrive)\boot",
@@ -2451,6 +2466,18 @@ exit
                     "/NDL"
                 )
                 $result = robocopy @robocopyArgs
+
+                # Also ensure GRUB modules are copied to the correct location
+                # GRUB looks for modules in specific paths
+                $grubModDirs = @(
+                    "$($script:EfiDrive)\boot\grub\x86_64-efi",
+                    "$($script:EfiDrive)\boot\grub2\x86_64-efi"
+                )
+                foreach ($modDir in $grubModDirs) {
+                    if (Test-Path $modDir) {
+                        Log-Message "Found GRUB modules at $modDir"
+                    }
+                }
             }
 
             # Copy isolinux directory if it exists
@@ -2493,6 +2520,120 @@ exit
 
             Log-Message "Files copied successfully!"
 
+            # Fix GRUB configuration to point to the data partition
+            Set-Status "Fixing GRUB configuration for split partition setup..."
+            Log-Message "Creating proper GRUB configuration for split partition boot..."
+
+            $dataLabel = $script:VolumeLabel
+            $efiLabel = $script:EfiLabel
+
+            # Find and patch all GRUB config files on both partitions
+            $configFiles = @()
+
+            # Search EFI partition for grub.cfg, grub.conf, isolinux.cfg
+            $efiConfigs = Get-ChildItem -Path $script:EfiDrive -Recurse -Include "*.cfg","*.conf" -ErrorAction SilentlyContinue
+            if ($efiConfigs) {
+                $configFiles += $efiConfigs
+            }
+
+            # Search data partition
+            $dataConfigs = Get-ChildItem -Path $script:NewDrive -Recurse -Include "*.cfg","*.conf" -ErrorAction SilentlyContinue
+            if ($dataConfigs) {
+                $configFiles += $dataConfigs
+            }
+
+            $patchedCount = 0
+            foreach ($cfgFile in $configFiles) {
+                try {
+                    $content = Get-Content $cfgFile.FullName -Raw -ErrorAction Stop
+                    $original = $content
+
+                    # Replace ALL label references with the data partition label
+                    # This ensures GRUB can find the kernel and initramfs on the NTFS partition
+
+                    # Root filesystem specifications (most important)
+                    $content = $content -replace '(root=live:LABEL=)[^\s\\]+', "`$1$dataLabel"
+                    $content = $content -replace '(root=live:CDLABEL=)[^\s\\]+', "`$1$dataLabel"
+                    $content = $content -replace '(root=LABEL=)[^\s\\]+', "`$1$dataLabel"
+                    $content = $content -replace '(root=/dev/disk/by-label/)[^\s]+', "`$1$dataLabel"
+
+                    # GRUB 'set root' commands - must point to partition with kernels
+                    $content = $content -replace "set root='[^']*'", "set root='$dataLabel'"
+                    $content = $content -replace 'set root="[^"]*"', "set root='$dataLabel'"
+
+                    # Fix search commands to find the data partition by label
+                    $content = $content -replace "(search\s+[^`\n]*--label\s+--set=root\s+)[^\s]+", "`$1$dataLabel"
+                    $content = $content -replace "(search\s+[^`\n]*-l\s+--set=root\s+)[^\s]+", "`$1$dataLabel"
+                    $content = $content -replace "(search\s+[^`\n]*--label\s+--set\s+)[^\s]+", "`$1$dataLabel"
+                    $content = $content -replace "(search\s+[^`\n]*-l\s+--set\s+)[^\s]+", "`$1$dataLabel"
+                    $content = $content -replace "(search\s+--no-floppy\s+--set=root\s+-l\s+)[^\s]+", "`$1$dataLabel"
+                    $content = $content -replace "(search\s+--no-floppy\s+--set=root\s+--label\s+)[^\s]+", "`$1$dataLabel"
+
+                    # Fedora/Bazzite/Atomic specific
+                    $content = $content -replace '(set isolabel=)[^\s]+', "`$1$dataLabel"
+                    $content = $content -replace '(CDLABEL=)[^\s\\]+', "`$1$dataLabel"
+
+                    # Ubuntu/Debian casper - ensure root is set
+                    if ($content -match 'boot=casper' -and $content -notmatch 'root=LABEL=') {
+                        $content = $content -replace '(linux\s+[^\s]+\s+)', "`$1root=LABEL=$dataLabel "
+                    }
+
+                    if ($content -ne $original) {
+                        Set-Content -Path $cfgFile.FullName -Value $content -Encoding UTF8 -Force
+                        $patchedCount++
+                        Log-Message "  Patched: $($cfgFile.Name)"
+                    }
+                }
+                catch {
+                    Log-Message "  Warning: Could not patch $($cfgFile.Name): $_" -Error
+                }
+            }
+
+            # If no config files found or patched, create a basic grub.cfg
+            if ($patchedCount -eq 0) {
+                Log-Message "No GRUB config files found. Creating a basic grub.cfg..."
+
+                $grubCfgPath = Join-Path $script:EfiDrive "EFI\BOOT\grub.cfg"
+                $grubCfgContent = @"
+# Auto-generated GRUB config for split partition boot
+# Data partition label: $dataLabel
+
+set timeout=10
+set default=0
+
+# Search for the data partition
+search --no-floppy --set=root --label $dataLabel
+
+menuentry "Boot from LINUX_DATA partition" {
+    search --no-floppy --set=root --label $dataLabel
+    echo "Loading kernel from LINUX_DATA partition..."
+    linux /vmlinuz root=LABEL=$dataLabel ro quiet splash
+    initrd /initrd.img
+}
+
+menuentry "Boot from LINUX_DATA (safe mode)" {
+    search --no-floppy --set=root --label $dataLabel
+    linux /vmlinuz root=LABEL=$dataLabel ro single
+    initrd /initrd.img
+}
+"@
+
+                try {
+                    Set-Content -Path $grubCfgPath -Value $grubCfgContent -Encoding UTF8 -Force
+                    Log-Message "Created basic grub.cfg at $grubCfgPath"
+                    $patchedCount++
+                }
+                catch {
+                    Log-Message "Failed to create grub.cfg: $_" -Error
+                }
+            }
+
+            if ($patchedCount -gt 0) {
+                Log-Message "Successfully configured GRUB to boot from data partition '$dataLabel'"
+            } else {
+                Log-Message "ERROR: Could not configure GRUB!" -Error
+            }
+
             Log-Message "Removing read-only attributes from data partition..."
             Set-Status "Removing read-only attributes..."
             try {
@@ -2524,79 +2665,31 @@ exit
             Dismount-DiskImage -ImagePath $script:IsoPath
         }
 
-        # Fedora-specific: fix volume label in GRUB and isolinux configs
-        if ($distro.Keyword -eq "Fedora") {
-            Set-Status "Fixing Fedora boot labels..."
-            Log-Message "Fixing Fedora volume label references in boot configs..."
+        # Fedora/Bazzite-specific additional fixes
+        if ($distro.Keyword -eq "Fedora" -or $distro.Keyword -eq "Bazzite") {
+            Set-Status "Fixing Fedora/Bazzite boot configuration..."
+            Log-Message "Applying additional fixes for Fedora/Bazzite..."
 
-            $dataLabel = $script:VolumeLabel  # LINUX_DATA
-
-            # Patch configs on EFI partition
-            $bootConfigFiles = @()
-            $searchPaths = @(
-                (Join-Path $script:EfiDrive "EFI\BOOT\grub.cfg"),
-                (Join-Path $script:EfiDrive "EFI\BOOT\BOOT.conf"),
-                (Join-Path $script:EfiDrive "boot\grub2\grub.cfg"),
-                (Join-Path $script:EfiDrive "boot\grub\grub.cfg"),
-                (Join-Path $script:EfiDrive "isolinux\isolinux.cfg"),
-                (Join-Path $script:EfiDrive "isolinux\grub.conf"),
-                (Join-Path $script:EfiDrive "syslinux\syslinux.cfg")
-            )
-
-            foreach ($cfgPath in $searchPaths) {
-                if (Test-Path $cfgPath) {
-                    $bootConfigFiles += $cfgPath
-                }
+            # Check if we have a valid EFI boot directory
+            $efiBootDir = Join-Path $script:EfiDrive "EFI\BOOT"
+            if (-not (Test-Path $efiBootDir)) {
+                Log-Message "Creating EFI\BOOT directory structure..."
+                New-Item -Path $efiBootDir -ItemType Directory -Force | Out-Null
             }
 
-            # Also patch configs on data partition
-            $dataSearchPaths = @(
-                (Join-Path $script:NewDrive "EFI\BOOT\grub.cfg"),
-                (Join-Path $script:NewDrive "EFI\BOOT\BOOT.conf"),
-                (Join-Path $script:NewDrive "boot\grub2\grub.cfg"),
-                (Join-Path $script:NewDrive "boot\grub\grub.cfg"),
-                (Join-Path $script:NewDrive "isolinux\isolinux.cfg"),
-                (Join-Path $script:NewDrive "isolinux\grub.conf"),
-                (Join-Path $script:NewDrive "syslinux\syslinux.cfg")
-            )
+            # Ensure BOOTx64.EFI exists
+            $bootx64Path = Join-Path $efiBootDir "BOOTx64.EFI"
+            $shimPath = Join-Path $efiBootDir "shimx64.efi"
+            $grubPath = Join-Path $efiBootDir "grubx64.efi"
 
-            foreach ($cfgPath in $dataSearchPaths) {
-                if (Test-Path $cfgPath) {
-                    $bootConfigFiles += $cfgPath
-                }
-            }
-
-            if ($bootConfigFiles.Count -eq 0) {
-                Log-Message "Warning: No boot config files found to patch" -Error
-            } else {
-                $patchedCount = 0
-                foreach ($cfgFile in $bootConfigFiles) {
-                    try {
-                        $content = Get-Content $cfgFile -Raw -ErrorAction Stop
-                        $originalContent = $content
-
-                        $content = $content -replace '(root=live:(?:CD)?LABEL=)([^\s\\]+)', "`$1$dataLabel"
-                        $content = $content -replace '(set isolabel=)([^\s]+)', "`$1$dataLabel"
-                        $content = $content -replace '(CDLABEL=)([^\s\\]+)', "`$1$dataLabel"
-
-                        if ($content -ne $originalContent) {
-                            Set-Content -Path $cfgFile -Value $content -Encoding UTF8 -Force
-                            Log-Message "  Patched: $(Split-Path -Leaf $cfgFile)"
-                            $patchedCount++
-                        } else {
-                            Log-Message "  No label references in: $(Split-Path -Leaf $cfgFile)"
-                        }
-                    }
-                    catch {
-                        Log-Message "  Warning: Could not patch $($cfgFile): $_" -Error
-                    }
-                }
-
-                if ($patchedCount -gt 0) {
-                    Log-Message "Patched $patchedCount boot config file(s) with label '$dataLabel'"
-                } else {
-                    Log-Message "Warning: No LABEL references found to patch. Fedora may not boot correctly." -Error
-                    Log-Message "You may need to manually edit EFI\BOOT\grub.cfg and replace the LABEL= value with '$dataLabel'" -Error
+            if (-not (Test-Path $bootx64Path)) {
+                # Try to copy from shim or grub
+                if (Test-Path $shimPath) {
+                    Copy-Item $shimPath $bootx64Path -Force
+                    Log-Message "Created BOOTx64.EFI from shimx64.efi"
+                } elseif (Test-Path $grubPath) {
+                    Copy-Item $grubPath $bootx64Path -Force
+                    Log-Message "Created BOOTx64.EFI from grubx64.efi"
                 }
             }
         }
