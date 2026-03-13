@@ -27,8 +27,9 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # Global variables
-$script:MinPartitionSizeGB = 7
+$script:MinPartitionSizeGB = 1  # Small FAT32 EFI partition for bootloader
 $script:MinLinuxSizeGB = 20
+$script:EfiPartitionSizeGB = 1  # EFI partition size in GB
 
 # ─── Distro Data Table ────────────────────────────────────────────────────────
 $script:Distros = [ordered]@{
@@ -410,7 +411,8 @@ function Format-AfterLayout {
             $lines += "  $label $NewShrinkSizeGB GB  (shrunk)"
             $lines += "  [Unallocated - Linux]  $LinuxSizeGB GB  <-- for Linux installer"
             if (-not $ShrinkLinuxOnly) {
-                $lines += "  LINUX_LIVE (FAT32)     $BootPartSizeGB GB  <-- $DistroName live boot"
+                $lines += "  LINUX_EFI (FAT32)      1 GB  <-- $DistroName EFI bootloader"
+                $lines += "  LINUX_DATA (NTFS)      (remainder)  <-- $DistroName ISO data"
             }
             continue
         }
@@ -426,7 +428,8 @@ function Format-AfterLayout {
         if ($RemainingFreeGB -gt 0) {
             $lines += "  [Unallocated - Linux]  $RemainingFreeGB GB  <-- for Linux installer"
         }
-        $lines += "  LINUX_LIVE (FAT32)     $BootPartSizeGB GB  <-- $DistroName live boot"
+        $lines += "  LINUX_EFI (FAT32)      1 GB  <-- $DistroName EFI bootloader"
+        $lines += "  LINUX_DATA (NTFS)      (remainder)  <-- $DistroName ISO data"
     }
 
     if ($NoChanges) {
@@ -932,7 +935,7 @@ function Show-DiskPlan {
             $canFreeAll = ($usableFreeGB -ge ($totalNeededGB + 1))
             $canFreeBoot = ($usableFreeGB -ge ($bootPartSizeGB + 1))
 
-            $radioShrink.Text = "Shrink C: by $totalNeededGB GB for both Linux ($LinuxSizeGB GB) and boot partition ($bootPartSizeGB GB)"
+            $radioShrink.Text = "Shrink C: by $totalNeededGB GB for both Linux ($LinuxSizeGB GB) and EFI partition (1 GB)"
             $radioShrink.Visible = $true
             $radioShrink.Enabled = $true
 
@@ -941,7 +944,7 @@ function Show-DiskPlan {
                 $radioFreeAll.Visible = $true
                 $radioFreeAll.Enabled = $true
             } elseif ($canFreeBoot) {
-                $radioFreeAll.Text = "Use existing free space for 7 GB boot partition, shrink C: by $LinuxSizeGB GB for Linux only"
+                $radioFreeAll.Text = "Use existing free space for 1 GB EFI partition, shrink C: by $LinuxSizeGB GB for Linux only"
                 $radioFreeAll.Visible = $true
                 $radioFreeAll.Enabled = $true
             } else {
@@ -976,36 +979,40 @@ function Show-DiskPlan {
                 "shrink_all" {
                     $newCSizeGB = [math]::Round($cSizeGB - $totalNeededGB, 2)
                     $changeLines += "  1. Shrink C: partition from $cSizeGB GB to $newCSizeGB GB  (-$totalNeededGB GB)"
-                    $changeLines += "  2. Create 7 GB FAT32 boot partition (LINUX_LIVE) with $distroName files"
-                    $changeLines += "  3. Leave $LinuxSizeGB GB unallocated for Linux installation"
-                    $changeLines += "  4. Configure UEFI boot entry for $distroName"
+                    $changeLines += "  2. Create 1 GB FAT32 EFI partition (LINUX_EFI) with bootloader"
+                    $changeLines += "  3. Create NTFS data partition (LINUX_DATA) for ISO files"
+                    $changeLines += "  4. Leave $LinuxSizeGB GB unallocated for Linux installation"
+                    $changeLines += "  5. Configure UEFI boot entry for $distroName"
 
                     $afterLines = Format-AfterLayout -Partitions $partitions -DistroName $distroName `
-                        -BootPartSizeGB $bootPartSizeGB -LinuxSizeGB $LinuxSizeGB `
+                        -BootPartSizeGB 1 -LinuxSizeGB $LinuxSizeGB `
                         -ShrinkLetter 'C' -NewShrinkSizeGB $newCSizeGB
                 }
                 "use_free_all" {
                     $changeLines += "  1. C: partition is NOT modified (stays at $cSizeGB GB)"
-                    $changeLines += "  2. Create 7 GB FAT32 boot partition (LINUX_LIVE) in existing free space"
-                    $changeLines += "  3. Remaining ~$([math]::Round($usableFreeGB - $bootPartSizeGB, 1)) GB stays unallocated for Linux"
-                    $changeLines += "  4. Configure UEFI boot entry for $distroName"
+                    $changeLines += "  2. Create 1 GB FAT32 EFI partition (LINUX_EFI) in existing free space"
+                    $changeLines += "  3. Create NTFS data partition (LINUX_DATA) for ISO files"
+                    $changeLines += "  4. Remaining ~$([math]::Round($usableFreeGB - 1, 1)) GB stays unallocated for Linux"
+                    $changeLines += "  5. Configure UEFI boot entry for $distroName"
 
-                    $remainFreeGB = [math]::Round($usableFreeGB - $bootPartSizeGB, 1)
+                    $remainFreeGB = [math]::Round($usableFreeGB - 1, 1)
                     $afterLines = Format-AfterLayout -Partitions $partitions -DistroName $distroName `
-                        -BootPartSizeGB $bootPartSizeGB -ShowUnchanged -AppendLinuxAndBoot `
+                        -BootPartSizeGB 1 -ShowUnchanged -AppendLinuxAndBoot `
                         -RemainingFreeGB $remainFreeGB
                 }
                 "use_free_boot" {
                     $newCSizeGB = [math]::Round($cSizeGB - $LinuxSizeGB, 2)
                     $changeLines += "  1. Shrink C: partition from $cSizeGB GB to $newCSizeGB GB  (-$LinuxSizeGB GB)"
-                    $changeLines += "  2. Create 7 GB FAT32 boot partition (LINUX_LIVE) in existing free space"
-                    $changeLines += "  3. Leave $LinuxSizeGB GB (from C: shrink) unallocated for Linux"
-                    $changeLines += "  4. Configure UEFI boot entry for $distroName"
+                    $changeLines += "  2. Create 1 GB FAT32 EFI partition (LINUX_EFI) in existing free space"
+                    $changeLines += "  3. Create NTFS data partition (LINUX_DATA) for ISO files"
+                    $changeLines += "  4. Leave $LinuxSizeGB GB (from C: shrink) unallocated for Linux"
+                    $changeLines += "  5. Configure UEFI boot entry for $distroName"
 
                     $afterLines = Format-AfterLayout -Partitions $partitions -DistroName $distroName `
-                        -BootPartSizeGB $bootPartSizeGB -LinuxSizeGB $LinuxSizeGB `
+                        -BootPartSizeGB 1 -LinuxSizeGB $LinuxSizeGB `
                         -ShrinkLetter 'C' -NewShrinkSizeGB $newCSizeGB -ShrinkLinuxOnly
-                    $afterLines += "  LINUX_LIVE (FAT32)     $bootPartSizeGB GB  <-- $distroName live boot"
+                    $afterLines += "  LINUX_EFI (FAT32)      1 GB  <-- $distroName EFI bootloader"
+                    $afterLines += "  LINUX_DATA (NTFS)      (remainder)  <-- $distroName ISO data"
                 }
             }
 
@@ -1158,43 +1165,47 @@ function Show-DiskPlan {
             $afterLines = @()
 
             if ($usingWipe) {
-                $usableGB = [math]::Round($selDisk.TotalGB - $bootPartSizeGB, 1)
+                $usableGB = [math]::Round($selDisk.TotalGB - 1, 1)
 
                 $changeLines += "  ** WARNING: This will ERASE ALL DATA on this disk! **"
                 $changeLines += ""
                 $changeLines += "  1. C: partition is NOT modified (different disk)"
                 $changeLines += "  2. Wipe Disk $selDiskNum and create a new GPT partition table"
-                $changeLines += "  3. Create $bootPartSizeGB GB FAT32 boot partition (LINUX_LIVE)"
-                $changeLines += "  4. Leave ~$usableGB GB unallocated for Linux installation"
-                $changeLines += "  5. Install bootloader to Windows ESP and configure UEFI boot entry for $DistroName"
+                $changeLines += "  3. Create 1 GB FAT32 EFI partition (LINUX_EFI) for bootloader"
+                $changeLines += "  4. Create NTFS data partition (LINUX_DATA) for ISO files"
+                $changeLines += "  5. Leave ~$usableGB GB unallocated for Linux installation"
+                $changeLines += "  6. Install bootloader to Windows ESP and configure UEFI boot entry for $DistroName"
 
-                $afterLines += "  LINUX_LIVE (FAT32)     $bootPartSizeGB GB  <-- $DistroName live boot"
+                $afterLines += "  LINUX_EFI (FAT32)      1 GB  <-- $DistroName EFI bootloader"
+                $afterLines += "  LINUX_DATA (NTFS)      (remainder)  <-- $DistroName ISO data"
                 $afterLines += "  [Unallocated - Linux]  ~$usableGB GB  <-- for Linux installer"
             } elseif ($usingShrink) {
                 $shrinkTarget = $bestShrink
                 $newPartSizeGB = [math]::Round($shrinkTarget.SizeGB - $totalNeededGB, 2)
                 $changeLines += "  1. C: partition is NOT modified (different disk selected)"
                 $changeLines += "  2. Shrink $($shrinkTarget.DriveLetter): from $($shrinkTarget.SizeGB) GB to $newPartSizeGB GB  (-$totalNeededGB GB)"
-                $changeLines += "  3. Create 7 GB FAT32 boot partition (LINUX_LIVE) on Disk $selDiskNum"
-                $changeLines += "  4. Leave $LinuxSizeGB GB unallocated for Linux installation"
-                $changeLines += "  5. Configure UEFI boot entry for $DistroName"
+                $changeLines += "  3. Create 1 GB FAT32 EFI partition (LINUX_EFI) on Disk $selDiskNum"
+                $changeLines += "  4. Create NTFS data partition (LINUX_DATA) on Disk $selDiskNum"
+                $changeLines += "  5. Leave $LinuxSizeGB GB unallocated for Linux installation"
+                $changeLines += "  6. Configure UEFI boot entry for $DistroName"
 
                 if ($partitions) {
                     $afterLines = Format-AfterLayout -Partitions $partitions -DistroName $DistroName `
-                        -BootPartSizeGB $bootPartSizeGB -LinuxSizeGB $LinuxSizeGB `
+                        -BootPartSizeGB 1 -LinuxSizeGB $LinuxSizeGB `
                         -ShrinkLetter $shrinkTarget.DriveLetter -NewShrinkSizeGB $newPartSizeGB
                 }
             } else {
                 if ($hasFreeSpace) {
                     $changeLines += "  1. C: partition is NOT modified (different disk selected)"
-                    $changeLines += "  2. Create 7 GB FAT32 boot partition (LINUX_LIVE) on Disk $selDiskNum"
-                    $changeLines += "  3. Remaining unallocated space on Disk $selDiskNum available for Linux"
-                    $changeLines += "  4. Configure UEFI boot entry for $DistroName"
+                    $changeLines += "  2. Create 1 GB FAT32 EFI partition (LINUX_EFI) on Disk $selDiskNum"
+                    $changeLines += "  3. Create NTFS data partition (LINUX_DATA) on Disk $selDiskNum"
+                    $changeLines += "  4. Remaining unallocated space on Disk $selDiskNum available for Linux"
+                    $changeLines += "  5. Configure UEFI boot entry for $DistroName"
 
-                    $remainFreeGB = [math]::Round($diskFreeGB - $bootPartSizeGB, 1)
+                    $remainFreeGB = [math]::Round($diskFreeGB - 1, 1)
                     if ($partitions) {
                         $afterLines = Format-AfterLayout -Partitions $partitions -DistroName $DistroName `
-                            -BootPartSizeGB $bootPartSizeGB -ShowUnchanged -AppendLinuxAndBoot `
+                            -BootPartSizeGB 1 -ShowUnchanged -AppendLinuxAndBoot `
                             -RemainingFreeGB $remainFreeGB
                     }
                 } else {
@@ -1803,41 +1814,74 @@ exit
 
             Start-Sleep -Seconds 2
 
-            # Create boot partition (7 GB)
-            Log-Message "Creating $($script:MinPartitionSizeGB) GB boot partition..."
-            Set-Status "Creating boot partition..."
+            # Create EFI boot partition (small FAT32)
+            Log-Message "Creating $($script:EfiPartitionSizeGB) GB EFI partition..."
+            Set-Status "Creating EFI boot partition..."
             try {
-                $bootPartition = New-Partition -DiskNumber $targetDiskNumber `
-                    -Size ([int64]($script:MinPartitionSizeGB * 1GB)) `
+                $efiPartition = New-Partition -DiskNumber $targetDiskNumber `
+                    -Size ([int64]($script:EfiPartitionSizeGB * 1GB)) `
                     -AssignDriveLetter `
                     -ErrorAction Stop
 
                 Start-Sleep -Seconds 2
-                $driveLetter = $bootPartition.DriveLetter
+                $efiDriveLetter = $efiPartition.DriveLetter
 
-                if (-not $driveLetter) {
-                    $bootPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+                if (-not $efiDriveLetter) {
+                    $efiPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 2
-                    $bootPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $bootPartition.PartitionNumber
-                    $driveLetter = $bootPartition.DriveLetter
+                    $efiPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $efiPartition.PartitionNumber
+                    $efiDriveLetter = $efiPartition.DriveLetter
                 }
 
-                if (-not $driveLetter) {
-                    throw "Could not assign a drive letter to the boot partition"
+                if (-not $efiDriveLetter) {
+                    throw "Could not assign a drive letter to the EFI partition"
                 }
 
-                Format-Volume -DriveLetter $driveLetter `
+                Format-Volume -DriveLetter $efiDriveLetter `
                     -FileSystem FAT32 `
-                    -NewFileSystemLabel "LINUX_LIVE" `
+                    -NewFileSystemLabel "LINUX_EFI" `
                     -Confirm:$false `
                     -ErrorAction Stop
 
-                Log-Message "Boot partition created as ${driveLetter}: (LINUX_LIVE)"
-                $script:NewDrive = "${driveLetter}:"
-                $script:VolumeLabel = "LINUX_LIVE"
+                Log-Message "EFI partition created as ${efiDriveLetter}: (LINUX_EFI)"
+
+                # Create data partition (NTFS) for the rest of the disk
+                Log-Message "Creating NTFS data partition..."
+                Set-Status "Creating NTFS data partition..."
+                $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                    -UseMaximumSize `
+                    -AssignDriveLetter `
+                    -ErrorAction Stop
+
+                Start-Sleep -Seconds 2
+                $dataDriveLetter = $dataPartition.DriveLetter
+
+                if (-not $dataDriveLetter) {
+                    $dataPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                    $dataPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $dataPartition.PartitionNumber
+                    $dataDriveLetter = $dataPartition.DriveLetter
+                }
+
+                if (-not $dataDriveLetter) {
+                    throw "Could not assign a drive letter to the data partition"
+                }
+
+                Format-Volume -DriveLetter $dataDriveLetter `
+                    -FileSystem NTFS `
+                    -NewFileSystemLabel "LINUX_DATA" `
+                    -Confirm:$false `
+                    -ErrorAction Stop
+
+                Log-Message "Data partition created as ${dataDriveLetter}: (LINUX_DATA)"
+
+                $script:NewDrive = "${dataDriveLetter}:"
+                $script:EfiDrive = "${efiDriveLetter}:"
+                $script:VolumeLabel = "LINUX_DATA"
+                $script:EfiLabel = "LINUX_EFI"
             }
             catch {
-                Log-Message "Failed to create boot partition: $_" -Error
+                Log-Message "Failed to create partitions: $_" -Error
                 return
             }
 
@@ -1850,7 +1894,8 @@ exit
 
             Log-Message ""
             Log-Message "Disk $targetDiskNumber wiped and reformatted successfully:"
-            Log-Message "  Partition 1: LINUX_LIVE ($($script:MinPartitionSizeGB) GB, ${driveLetter}:)"
+            Log-Message "  Partition 1: LINUX_EFI ($($script:EfiPartitionSizeGB) GB, ${efiDriveLetter}:)"
+            Log-Message "  Partition 2: LINUX_DATA (NTFS, ${dataDriveLetter}:)"
             Log-Message "  Unallocated: ~$unallocGB GB (for Linux installer)"
             Log-Message ""
         }
@@ -1971,7 +2016,7 @@ exit
                 }
             }
 
-            $bootPartitionSize = [int64]($script:MinPartitionSizeGB * 1GB)
+            $bootPartitionSize = [int64]($script:EfiPartitionSizeGB * 1GB)
             $alignmentSize = [int64](1MB)
             $bufferSize = [int64](16MB)
             $minGapRequired = $bootPartitionSize + $bufferSize + $alignmentSize
@@ -1986,7 +2031,7 @@ exit
             $usableGaps = $gaps | Where-Object { $_.Size -ge $minGapRequired }
 
             if (-not $usableGaps) {
-                throw "No unallocated gap large enough for the $script:MinPartitionSizeGB GB boot partition"
+                throw "No unallocated gap large enough for the $script:EfiPartitionSizeGB GB EFI partition"
             }
 
             $anchorGap = $usableGaps | Where-Object {
@@ -2018,9 +2063,9 @@ exit
 
             Log-Message "Creating boot partition..."
 
-            $bootPartitionSize = [int64]($script:MinPartitionSizeGB * 1GB)
+            $bootPartitionSize = [int64]($script:EfiPartitionSizeGB * 1GB)
             $offsetMB = [int64]([Math]::Floor($bootPartitionOffset / 1MB))
-            $sizeMB = [int64]($script:MinPartitionSizeGB * 1024)
+            $sizeMB = [int64]($script:EfiPartitionSizeGB * 1024)
 
             if ($offsetMB -lt 0 -or $bootPartitionOffset -gt $disk.Size) {
                 throw "Invalid offset calculated: $offsetMB MB (from $bootPartitionOffset bytes)"
@@ -2104,7 +2149,7 @@ exit
                     $gapSizeGB = [math]::Round($gapSize / 1GB, 2)
                     Log-Message "Gap between C: and Recovery: $gapSizeGB GB"
 
-                    $fillerSize = [int64]($gapSize - ($script:MinPartitionSizeGB * 1GB) - (1GB))
+                    $fillerSize = [int64]($gapSize - ($script:EfiPartitionSizeGB * 1GB) - (1GB))
                     $fillerSizeGB = [math]::Round($fillerSize / 1GB, 2)
 
                     if ($fillerSize -gt 0) {
@@ -2115,10 +2160,10 @@ exit
                                 -Size $fillerSize `
                                 -ErrorAction Stop
 
-                            Log-Message "Filler partition created. Now creating boot partition..."
+                            Log-Message "Filler partition created. Now creating EFI partition..."
 
                             $bootPartition = New-Partition -DiskNumber $targetDiskNumber `
-                                -Size ($script:MinPartitionSizeGB * 1GB) `
+                                -Size ($script:EfiPartitionSizeGB * 1GB) `
                                 -AssignDriveLetter `
                                 -ErrorAction Stop
 
@@ -2128,7 +2173,7 @@ exit
                                 -Confirm:$false `
                                 -ErrorAction Stop
 
-                            Log-Message "Filler partition removed. Boot partition should now be at end."
+                            Log-Message "Filler partition removed. EFI partition should now be at end."
                             $partitionCreated = $true
                             $newPartition = $bootPartition
                             $driveLetter = $bootPartition.DriveLetter
@@ -2150,13 +2195,13 @@ exit
                 Log-Message "All offset methods failed. Creating partition without specific offset..."
                 try {
                     $newPartition = New-Partition -DiskNumber $targetDiskNumber `
-                        -Size ($script:MinPartitionSizeGB * 1GB) `
+                        -Size ($script:EfiPartitionSizeGB * 1GB) `
                         -AssignDriveLetter `
                         -ErrorAction Stop
 
                     $driveLetter = $newPartition.DriveLetter
                     $partitionCreated = $true
-                    Log-Message "Boot partition created using standard method"
+                    Log-Message "EFI partition created using standard method"
                 }
                 catch {
                     throw "All partition creation methods failed: $_"
@@ -2166,7 +2211,7 @@ exit
             if ($partitionCreated -and -not $driveLetter) {
                 Start-Sleep -Seconds 3
 
-                $targetSize = [int64]($script:MinPartitionSizeGB * 1GB)
+                $targetSize = [int64]($script:EfiPartitionSizeGB * 1GB)
                 $tolerance = [int64](100MB)
 
                 $newPartitions = Get-Partition -DiskNumber $targetDiskNumber |
@@ -2184,27 +2229,68 @@ exit
                         $driveLetter = $bootPartition.DriveLetter
                     }
                 } else {
-                    throw "Cannot find newly created boot partition"
+                    throw "Cannot find newly created EFI partition"
                 }
             }
 
             if (-not $driveLetter) {
-                throw "Failed to get drive letter for boot partition"
+                throw "Failed to get drive letter for EFI partition"
             }
 
-            Log-Message "Formatting boot partition as FAT32..."
+            # Format EFI partition as FAT32
+            Log-Message "Formatting EFI partition as FAT32..."
 
-            $volumeLabel = "LINUX_LIVE"
+            $efiLabel = "LINUX_EFI"
 
             Format-Volume -DriveLetter $driveLetter `
                 -FileSystem FAT32 `
-                -NewFileSystemLabel $volumeLabel `
+                -NewFileSystemLabel $efiLabel `
                 -Confirm:$false `
                 -ErrorAction Stop
 
-            Log-Message "Boot partition created and assigned to ${driveLetter}:"
-            $script:NewDrive = "${driveLetter}:"
-            $script:VolumeLabel = $volumeLabel
+            Log-Message "EFI partition created and assigned to ${driveLetter}:"
+            $script:EfiDrive = "${driveLetter}:"
+            $script:EfiLabel = $efiLabel
+
+            # Now create the data partition (NTFS) for the rest of the unallocated space
+            Log-Message "Creating NTFS data partition..."
+            Start-Sleep -Seconds 2
+
+            try {
+                $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                    -UseMaximumSize `
+                    -AssignDriveLetter `
+                    -ErrorAction Stop
+
+                Start-Sleep -Seconds 2
+                $dataDriveLetter = $dataPartition.DriveLetter
+
+                if (-not $dataDriveLetter) {
+                    $dataPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                    $dataPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $dataPartition.PartitionNumber
+                    $dataDriveLetter = $dataPartition.DriveLetter
+                }
+
+                if (-not $dataDriveLetter) {
+                    throw "Could not assign a drive letter to the data partition"
+                }
+
+                Log-Message "Formatting data partition as NTFS..."
+                Format-Volume -DriveLetter $dataDriveLetter `
+                    -FileSystem NTFS `
+                    -NewFileSystemLabel "LINUX_DATA" `
+                    -Confirm:$false `
+                    -ErrorAction Stop
+
+                Log-Message "Data partition created and assigned to ${dataDriveLetter}:"
+                $script:NewDrive = "${dataDriveLetter}:"
+                $script:VolumeLabel = "LINUX_DATA"
+            }
+            catch {
+                Log-Message "Failed to create data partition: $_" -Error
+                return
+            }
 
             Log-Message ""
             Log-Message "=== Final Disk Layout (Disk $targetDiskNumber) ==="
@@ -2324,12 +2410,68 @@ exit
             return
         }
 
-        # Copy files
+        # Copy files - split between EFI and data partitions
         Set-Status "Copying files..."
-        Log-Message "Copying $distroName files to $script:NewDrive..."
+        Log-Message "Copying $distroName files..."
         Log-Message "This may take 10-20 minutes..."
 
         try {
+            # First, copy EFI/bootloader files to the small FAT32 partition
+            Log-Message "Copying EFI boot files to $($script:EfiDrive)..."
+            $efiSourcePath = "$sourceDrive\EFI"
+            if (Test-Path $efiSourcePath) {
+                $robocopyArgs = @(
+                    $efiSourcePath,
+                    "$($script:EfiDrive)\EFI",
+                    "/E",
+                    "/R:3",
+                    "/W:5",
+                    "/NP",
+                    "/NFL",
+                    "/NDL"
+                )
+                $result = robocopy @robocopyArgs
+                if ($LASTEXITCODE -ge 8) {
+                    Log-Message "Warning: EFI copy exit code: $LASTEXITCODE"
+                }
+            }
+
+            # Copy boot directory if it exists (for GRUB configs)
+            $bootSourcePath = "$sourceDrive\boot"
+            if (Test-Path $bootSourcePath) {
+                Log-Message "Copying boot directory..."
+                $robocopyArgs = @(
+                    $bootSourcePath,
+                    "$($script:EfiDrive)\boot",
+                    "/E",
+                    "/R:3",
+                    "/W:5",
+                    "/NP",
+                    "/NFL",
+                    "/NDL"
+                )
+                $result = robocopy @robocopyArgs
+            }
+
+            # Copy isolinux directory if it exists
+            $isolinuxSourcePath = "$sourceDrive\isolinux"
+            if (Test-Path $isolinuxSourcePath) {
+                Log-Message "Copying isolinux directory..."
+                $robocopyArgs = @(
+                    $isolinuxSourcePath,
+                    "$($script:EfiDrive)\isolinux",
+                    "/E",
+                    "/R:3",
+                    "/W:5",
+                    "/NP",
+                    "/NFL",
+                    "/NDL"
+                )
+                $result = robocopy @robocopyArgs
+            }
+
+            # Now copy all files to the data partition
+            Log-Message "Copying all files to data partition $($script:NewDrive)..."
             $robocopyArgs = @(
                 $sourceDrive,
                 $script:NewDrive,
@@ -2351,7 +2493,7 @@ exit
 
             Log-Message "Files copied successfully!"
 
-            Log-Message "Removing read-only attributes..."
+            Log-Message "Removing read-only attributes from data partition..."
             Set-Status "Removing read-only attributes..."
             try {
                 Get-ChildItem -Path $script:NewDrive -Recurse -Force -ErrorAction SilentlyContinue |
@@ -2361,6 +2503,17 @@ exit
                     }
             } catch {
                 Log-Message "Warning: Could not remove all read-only attributes: $_" -Error
+            }
+
+            Log-Message "Removing read-only attributes from EFI partition..."
+            try {
+                Get-ChildItem -Path $script:EfiDrive -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReadOnly } |
+                    ForEach-Object {
+                        $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                    }
+            } catch {
+                Log-Message "Warning: Could not remove all read-only attributes from EFI: $_" -Error
             }
         }
         catch {
@@ -2376,10 +2529,28 @@ exit
             Set-Status "Fixing Fedora boot labels..."
             Log-Message "Fixing Fedora volume label references in boot configs..."
 
-            $fedoraLabel = $script:VolumeLabel
+            $dataLabel = $script:VolumeLabel  # LINUX_DATA
 
+            # Patch configs on EFI partition
             $bootConfigFiles = @()
             $searchPaths = @(
+                (Join-Path $script:EfiDrive "EFI\BOOT\grub.cfg"),
+                (Join-Path $script:EfiDrive "EFI\BOOT\BOOT.conf"),
+                (Join-Path $script:EfiDrive "boot\grub2\grub.cfg"),
+                (Join-Path $script:EfiDrive "boot\grub\grub.cfg"),
+                (Join-Path $script:EfiDrive "isolinux\isolinux.cfg"),
+                (Join-Path $script:EfiDrive "isolinux\grub.conf"),
+                (Join-Path $script:EfiDrive "syslinux\syslinux.cfg")
+            )
+
+            foreach ($cfgPath in $searchPaths) {
+                if (Test-Path $cfgPath) {
+                    $bootConfigFiles += $cfgPath
+                }
+            }
+
+            # Also patch configs on data partition
+            $dataSearchPaths = @(
                 (Join-Path $script:NewDrive "EFI\BOOT\grub.cfg"),
                 (Join-Path $script:NewDrive "EFI\BOOT\BOOT.conf"),
                 (Join-Path $script:NewDrive "boot\grub2\grub.cfg"),
@@ -2389,7 +2560,7 @@ exit
                 (Join-Path $script:NewDrive "syslinux\syslinux.cfg")
             )
 
-            foreach ($cfgPath in $searchPaths) {
+            foreach ($cfgPath in $dataSearchPaths) {
                 if (Test-Path $cfgPath) {
                     $bootConfigFiles += $cfgPath
                 }
@@ -2404,9 +2575,9 @@ exit
                         $content = Get-Content $cfgFile -Raw -ErrorAction Stop
                         $originalContent = $content
 
-                        $content = $content -replace '(root=live:(?:CD)?LABEL=)([^\s\\]+)', "`$1$fedoraLabel"
-                        $content = $content -replace '(set isolabel=)([^\s]+)', "`$1$fedoraLabel"
-                        $content = $content -replace '(CDLABEL=)([^\s\\]+)', "`$1$fedoraLabel"
+                        $content = $content -replace '(root=live:(?:CD)?LABEL=)([^\s\\]+)', "`$1$dataLabel"
+                        $content = $content -replace '(set isolabel=)([^\s]+)', "`$1$dataLabel"
+                        $content = $content -replace '(CDLABEL=)([^\s\\]+)', "`$1$dataLabel"
 
                         if ($content -ne $originalContent) {
                             Set-Content -Path $cfgFile -Value $content -Encoding UTF8 -Force
@@ -2422,10 +2593,10 @@ exit
                 }
 
                 if ($patchedCount -gt 0) {
-                    Log-Message "Patched $patchedCount boot config file(s) with label '$fedoraLabel'"
+                    Log-Message "Patched $patchedCount boot config file(s) with label '$dataLabel'"
                 } else {
                     Log-Message "Warning: No LABEL references found to patch. Fedora may not boot correctly." -Error
-                    Log-Message "You may need to manually edit EFI\BOOT\grub.cfg and replace the LABEL= value with '$fedoraLabel'" -Error
+                    Log-Message "You may need to manually edit EFI\BOOT\grub.cfg and replace the LABEL= value with '$dataLabel'" -Error
                 }
             }
         }
@@ -2434,7 +2605,8 @@ exit
         Set-Status "Creating boot configuration..."
         Log-Message "Creating boot configuration..."
 
-        $efiPath = $script:NewDrive + "\EFI\BOOT"
+        # Ensure EFI\BOOT directory exists on EFI partition
+        $efiPath = $script:EfiDrive + "\EFI\BOOT"
         if (-not (Test-Path $efiPath)) {
             New-Item -Path $efiPath -ItemType Directory -Force
         }
@@ -2478,16 +2650,18 @@ exit
                 $distroEspDir = "$winEspDrive$($script:WipeEspDistroDir)"
                 New-Item -Path $distroEspDir -ItemType Directory -Force | Out-Null
 
-                $sourceEfi = $script:NewDrive + "\EFI\BOOT"
+                # Copy EFI boot files from the EFI partition
+                $sourceEfi = $script:EfiDrive + "\EFI\BOOT"
                 if (Test-Path $sourceEfi) {
                     robocopy $sourceEfi $distroEspDir /E /R:2 /W:2 /NP /NFL /NDL | Out-Null
                     Log-Message "EFI\BOOT directory copied to $distroEspDir"
                 } else {
-                    throw "No EFI\BOOT directory found on $($script:NewDrive)"
+                    throw "No EFI\BOOT directory found on $($script:EfiDrive)"
                 }
 
+                # Copy boot directories from EFI partition
                 foreach ($grubDir in @("boot\grub", "boot\grub2")) {
-                    $srcGrub = Join-Path $script:NewDrive $grubDir
+                    $srcGrub = Join-Path $script:EfiDrive $grubDir
                     if (Test-Path $srcGrub) {
                         $dstGrub = Join-Path $distroEspDir $grubDir
                         New-Item -Path $dstGrub -ItemType Directory -Force | Out-Null
@@ -2496,8 +2670,8 @@ exit
                     }
                 }
 
-                $liveLabel = $script:VolumeLabel
-                Log-Message "Patching boot configs in ESP to use label '$liveLabel'..."
+                $dataLabel = $script:VolumeLabel
+                Log-Message "Patching boot configs in ESP to use label '$dataLabel'..."
 
                 $cfgFiles = Get-ChildItem -Path $distroEspDir -Recurse -Include "*.cfg","*.conf" -ErrorAction SilentlyContinue
                 $patchedCount = 0
@@ -2506,15 +2680,15 @@ exit
                         $content = Get-Content $cfgFile.FullName -Raw -ErrorAction Stop
                         $original = $content
 
-                        $content = $content -replace "(search\s+[^`n]*(?:--label|-l)\s+')[^']+(')", "`$1$liveLabel`$2"
-                        $content = $content -replace '(search\s+[^\n]*(?:--label|-l)\s+")([^"]+)(")', "`$1$liveLabel`$3"
-                        $content = $content -replace "(search\s+[^`n]*(?:--label|-l)\s+)(\S+)(\s)", "`$1$liveLabel`$3"
+                        $content = $content -replace "(search\s+[^`n]*(?:--label|-l)\s+')[^']+(')", "`$1$dataLabel`$2"
+                        $content = $content -replace '(search\s+[^\n]*(?:--label|-l)\s+")([^"]+)(")', "`$1$dataLabel`$3"
+                        $content = $content -replace "(search\s+[^`n]*(?:--label|-l)\s+)(\S+)(\s)", "`$1$dataLabel`$3"
 
-                        $content = $content -replace '(root=live:(?:CD)?LABEL=)([^\s\\]+)', "`$1$liveLabel"
-                        $content = $content -replace '(set isolabel=)([^\s]+)', "`$1$liveLabel"
-                        $content = $content -replace '(CDLABEL=)([^\s\\]+)', "`$1$liveLabel"
+                        $content = $content -replace '(root=live:(?:CD)?LABEL=)([^\s\\]+)', "`$1$dataLabel"
+                        $content = $content -replace '(set isolabel=)([^\s]+)', "`$1$dataLabel"
+                        $content = $content -replace '(CDLABEL=)([^\s\\]+)', "`$1$dataLabel"
 
-                        $content = $content -replace '(LABEL=)([^\s\\]+)', "`$1$liveLabel"
+                        $content = $content -replace '(LABEL=)([^\s\\]+)', "`$1$dataLabel"
 
                         if ($content -ne $original) {
                             Set-Content -Path $cfgFile.FullName -Value $content -Encoding UTF8 -Force
@@ -2635,8 +2809,9 @@ exit
                             $script:WipeEspPartition | Remove-PartitionAccessPath -AccessPath "$($script:WipeEspLetter):\" -ErrorAction SilentlyContinue
                         }
                     } else {
-                        $bootDeviceDrive = $script:NewDrive
-                        Log-Message "Boot entry will point to partition: $bootDeviceDrive"
+                        # Use the EFI partition for the boot entry, not the data partition
+                        $bootDeviceDrive = $script:EfiDrive
+                        Log-Message "Boot entry will point to EFI partition: $bootDeviceDrive"
                         Log-Message "Attempting bcdedit /copy method..."
                         $bootCreated = New-UefiBootEntry -DistroName $distroName `
                             -DevicePartition $bootDeviceDrive -EfiPath "\EFI\BOOT\BOOTx64.EFI"
@@ -2663,7 +2838,8 @@ UEFI Boot Setup Instructions for $distroName
 Your $distroName bootable partition has been created successfully!
 
 Disk Layout (Disk $targetDiskNumber):
-- Boot Drive: $script:NewDrive (7 GB, FAT32, labelled LINUX_LIVE)
+- EFI Boot Drive: $script:EfiDrive (1 GB, FAT32, labelled LINUX_EFI)
+- Data Drive: $script:NewDrive (NTFS, labelled LINUX_DATA)
 - Disk Number: $targetDiskNumber
 "@
         if ($isOtherDrive) {
@@ -2743,13 +2919,16 @@ Troubleshooting:
 "@
 
         $instructions | Out-File -FilePath ($script:NewDrive + "\UEFI_BOOT_INSTRUCTIONS.txt") -Encoding UTF8
+        $instructions | Out-File -FilePath ($script:EfiDrive + "\UEFI_BOOT_INSTRUCTIONS.txt") -Encoding UTF8
         $instructions | Out-File -FilePath (Join-Path $env:USERPROFILE "Desktop\Linux_Boot_Instructions.txt") -Encoding UTF8
 
         # Success
         Log-Message "====================================="
         Log-Message "Installation Complete!"
         Log-Message "====================================="
-        Log-Message "$distroName boot partition created at drive $script:NewDrive"
+        Log-Message "$distroName boot partitions created:"
+        Log-Message "  - EFI partition: $script:EfiDrive (FAT32, $script:EfiLabel)"
+        Log-Message "  - Data partition: $script:NewDrive (NTFS, $script:VolumeLabel)"
         if ($customRadio.Checked) {
             Log-Message "ISO used: $(Split-Path -Leaf $script:CustomIsoPath)"
         }
