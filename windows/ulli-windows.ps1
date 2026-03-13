@@ -2520,79 +2520,13 @@ exit
             throw "UEFI-NTFS driver installation failed"
         }
 
-        # Copy files - split between EFI and data partitions
+        # Copy files to NTFS data partition only
         Set-Status "Copying files..."
-        Log-Message "Copying $distroName files..."
+        Log-Message "Copying $distroName files to NTFS data partition..."
         Log-Message "This may take 10-20 minutes..."
 
         try {
-            # Copy boot directory if it exists (for GRUB configs and modules - backup, not strictly needed)
-            Log-Message "Copying EFI boot files to $($script:EfiDrive)..."
-            $efiSourcePath = "$sourceDrive\EFI"
-            if (Test-Path $efiSourcePath) {
-                $robocopyArgs = @(
-                    $efiSourcePath,
-                    "$($script:EfiDrive)\EFI",
-                    "/E",
-                    "/R:3",
-                    "/W:5",
-                    "/NP",
-                    "/NFL",
-                    "/NDL"
-                )
-                $result = robocopy @robocopyArgs
-                if ($LASTEXITCODE -ge 8) {
-                    Log-Message "Warning: EFI copy exit code: $LASTEXITCODE"
-                }
-            }
-
-            # Copy boot directory if it exists (for GRUB configs and modules)
-            $bootSourcePath = "$sourceDrive\boot"
-            if (Test-Path $bootSourcePath) {
-                Log-Message "Copying boot directory (GRUB modules and configs)..."
-                $robocopyArgs = @(
-                    $bootSourcePath,
-                    "$($script:EfiDrive)\boot",
-                    "/E",
-                    "/R:3",
-                    "/W:5",
-                    "/NP",
-                    "/NFL",
-                    "/NDL"
-                )
-                $result = robocopy @robocopyArgs
-
-                # Also ensure GRUB modules are copied to the correct location
-                # GRUB looks for modules in specific paths
-                $grubModDirs = @(
-                    "$($script:EfiDrive)\boot\grub\x86_64-efi",
-                    "$($script:EfiDrive)\boot\grub2\x86_64-efi"
-                )
-                foreach ($modDir in $grubModDirs) {
-                    if (Test-Path $modDir) {
-                        Log-Message "Found GRUB modules at $modDir"
-                    }
-                }
-            }
-
-            # Copy isolinux directory if it exists
-            $isolinuxSourcePath = "$sourceDrive\isolinux"
-            if (Test-Path $isolinuxSourcePath) {
-                Log-Message "Copying isolinux directory..."
-                $robocopyArgs = @(
-                    $isolinuxSourcePath,
-                    "$($script:EfiDrive)\isolinux",
-                    "/E",
-                    "/R:3",
-                    "/W:5",
-                    "/NP",
-                    "/NFL",
-                    "/NDL"
-                )
-                $result = robocopy @robocopyArgs
-            }
-
-            # Now copy all files to the data partition
+            # Copy entire ISO contents to the NTFS data partition
             $robocopyArgs = @(
                 $sourceDrive,
                 $script:NewDrive,
@@ -2629,17 +2563,6 @@ exit
                     }
             } catch {
                 Log-Message "Warning: Could not remove all read-only attributes: $_" -Error
-            }
-
-            Log-Message "Removing read-only attributes from EFI partition..."
-            try {
-                Get-ChildItem -Path $script:EfiDrive -Recurse -Force -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReadOnly } |
-                    ForEach-Object {
-                        $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
-                    }
-            } catch {
-                Log-Message "Warning: Could not remove all read-only attributes from EFI: $_" -Error
             }
         }
         catch {
