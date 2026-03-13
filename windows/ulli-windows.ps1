@@ -2476,13 +2476,57 @@ exit
             return
         }
 
+        # Install uefi-ntfs driver chain FIRST (before copying ISO files)
+        Set-Status "Installing UEFI NTFS boot support..."
+        Log-Message "Installing uefi-ntfs driver chain..."
+
+        try {
+            # Create EFI/BOOT directory
+            $efiBootDir = Join-Path $script:EfiDrive "EFI\BOOT"
+            if (-not (Test-Path $efiBootDir)) {
+                New-Item -Path $efiBootDir -ItemType Directory -Force | Out-Null
+            }
+
+            # Create EFI/rufus directory for NTFS driver
+            $efiRufusDir = Join-Path $script:EfiDrive "EFI\rufus"
+            if (-not (Test-Path $efiRufusDir)) {
+                New-Item -Path $efiRufusDir -ItemType Directory -Force | Out-Null
+            }
+
+            # Download custom uefi-ntfs BOOTx64.EFI
+            $bootx64Url = "https://github.com/ArchangelJTW/uefi-ntfs/releases/download/v1.0.0/bootx64.efi"
+            $bootx64Path = Join-Path $efiBootDir "BOOTX64.EFI"
+            Log-Message "Downloading uefi-ntfs BOOTx64.EFI..."
+            Invoke-WebRequest -Uri $bootx64Url -OutFile $bootx64Path -ErrorAction Stop
+            Log-Message "Downloaded BOOTx64.EFI"
+
+            # Download NTFS driver to \EFI\rufus\ntfs_x64.efi
+            $ntfsDriverUrl = "https://github.com/pbatard/efifs/releases/download/v1.11/ntfs_x64.efi"
+            $ntfsDriverPath = Join-Path $efiRufusDir "ntfs_x64.efi"
+            Log-Message "Downloading NTFS driver..."
+            Invoke-WebRequest -Uri $ntfsDriverUrl -OutFile $ntfsDriverPath -ErrorAction Stop
+            Log-Message "Downloaded ntfs_x64.efi to \EFI\rufus\"
+
+            # Create uefi-ntfs.conf with the data partition label
+            $configPath = Join-Path $efiBootDir "uefi-ntfs.conf"
+            $dataLabel = $script:VolumeLabel
+            Set-Content -Path $configPath -Value $dataLabel -Encoding ASCII -Force
+            Log-Message "Created uefi-ntfs.conf with label: $dataLabel"
+
+            Log-Message "UEFI NTFS boot chain installed successfully!"
+        }
+        catch {
+            Log-Message "ERROR: Failed to install uefi-ntfs driver: $_" -Error
+            throw "UEFI-NTFS driver installation failed"
+        }
+
         # Copy files - split between EFI and data partitions
         Set-Status "Copying files..."
         Log-Message "Copying $distroName files..."
         Log-Message "This may take 10-20 minutes..."
 
         try {
-            # First, copy EFI/bootloader files to the small FAT32 partition
+            # Copy boot directory if it exists (for GRUB configs and modules - backup, not strictly needed)
             Log-Message "Copying EFI boot files to $($script:EfiDrive)..."
             $efiSourcePath = "$sourceDrive\EFI"
             if (Test-Path $efiSourcePath) {
@@ -2548,50 +2592,7 @@ exit
                 $result = robocopy @robocopyArgs
             }
 
-            # Install uefi-ntfs driver chain for native UEFI NTFS boot support
-            Set-Status "Installing UEFI NTFS boot support..."
-            Log-Message "Installing uefi-ntfs driver chain..."
-
-            try {
-                # Create EFI/BOOT directory
-                $efiBootDir = Join-Path $script:EfiDrive "EFI\BOOT"
-                if (-not (Test-Path $efiBootDir)) {
-                    New-Item -Path $efiBootDir -ItemType Directory -Force | Out-Null
-                }
-
-                # Create EFI/rufus directory for NTFS driver
-                $efiRufusDir = Join-Path $script:EfiDrive "EFI\rufus"
-                if (-not (Test-Path $efiRufusDir)) {
-                    New-Item -Path $efiRufusDir -ItemType Directory -Force | Out-Null
-                }
-
-                # Download custom uefi-ntfs BOOTx64.EFI
-                $bootx64Url = "https://github.com/ArchangelJTW/uefi-ntfs/releases/download/v1.0.0/bootx64.efi"
-                $bootx64Path = Join-Path $efiBootDir "BOOTx64.EFI"
-                Log-Message "Downloading uefi-ntfs BOOTx64.EFI..."
-                Invoke-WebRequest -Uri $bootx64Url -OutFile $bootx64Path -ErrorAction Stop
-                Log-Message "Downloaded BOOTx64.EFI"
-
-                # Download NTFS driver to \EFI\rufus\ntfs_x64.efi
-                $ntfsDriverUrl = "https://github.com/pbatard/efifs/releases/download/v1.11/ntfs_x64.efi"
-                $ntfsDriverPath = Join-Path $efiRufusDir "ntfs_x64.efi"
-                Log-Message "Downloading NTFS driver..."
-                Invoke-WebRequest -Uri $ntfsDriverUrl -OutFile $ntfsDriverPath -ErrorAction Stop
-                Log-Message "Downloaded ntfs_x64.efi to \EFI\rufus\"
-
-                # Create uefi-ntfs.conf with the data partition label
-                $configPath = Join-Path $efiBootDir "uefi-ntfs.conf"
-                $dataLabel = $script:VolumeLabel
-                Set-Content -Path $configPath -Value $dataLabel -Encoding ASCII -Force
-                Log-Message "Created uefi-ntfs.conf with label: $dataLabel"
-
-                Log-Message "UEFI NTFS boot chain installed successfully!"
-            }
-            catch {
-                Log-Message "ERROR: Failed to install uefi-ntfs driver: $_" -Error
-                throw "UEFI-NTFS driver installation failed"
-            }
-            Log-Message "Copying all files to data partition $($script:NewDrive)..."
+            # Now copy all files to the data partition
             $robocopyArgs = @(
                 $sourceDrive,
                 $script:NewDrive,
