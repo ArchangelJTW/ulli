@@ -1860,35 +1860,66 @@ exit
 
                 Log-Message "EFI partition created as ${efiDriveLetter}: (LINUX_EFI)"
 
-                # Create data partition (NTFS) for the rest of the disk
-                Log-Message "Creating NTFS data partition..."
-                Set-Status "Creating NTFS data partition..."
-                $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
-                    -UseMaximumSize `
-                    -AssignDriveLetter `
-                    -ErrorAction Stop
+                # Calculate the size needed for the data partition (ISO size + 500MB buffer)
+                $isoInfo = Get-Item $script:IsoPath -ErrorAction SilentlyContinue
+                if ($isoInfo) {
+                    $isoSizeBytes = $isoInfo.Length
+                    $bufferBytes = [int64](500MB)
+                    $dataPartitionSize = $isoSizeBytes + $bufferBytes
 
-                Start-Sleep -Seconds 2
-                $dataDriveLetter = $dataPartition.DriveLetter
+                    # Round up to next MB for alignment
+                    $dataPartitionSize = [int64]([Math]::Ceiling($dataPartitionSize / 1MB) * 1MB)
 
-                if (-not $dataDriveLetter) {
-                    $dataPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+                    $dataSizeGB = [math]::Round($dataPartitionSize / 1GB, 2)
+                    Log-Message "ISO size: $([math]::Round($isoSizeBytes / 1GB, 2)) GB, creating data partition: $dataSizeGB GB"
+
+                    $createDataPartition = $true
+                } else {
+                    Log-Message "Warning: Could not determine ISO size, using maximum available space"
+                    $dataPartitionSize = $null
+                    $createDataPartition = $true
+                }
+
+                # Create data partition (NTFS) sized to fit the ISO
+                if ($createDataPartition) {
+                    Log-Message "Creating NTFS data partition..."
+                    Set-Status "Creating NTFS data partition..."
+
+                    if ($dataPartitionSize) {
+                        $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                            -Size $dataPartitionSize `
+                            -AssignDriveLetter `
+                            -ErrorAction Stop
+                    } else {
+                        # Fallback to maximum size if ISO size couldn't be determined
+                        $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                            -UseMaximumSize `
+                            -AssignDriveLetter `
+                            -ErrorAction Stop
+                    }
+
                     Start-Sleep -Seconds 2
-                    $dataPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $dataPartition.PartitionNumber
                     $dataDriveLetter = $dataPartition.DriveLetter
+
+                    if (-not $dataDriveLetter) {
+                        $dataPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 2
+                        $dataPartition = Get-Partition -DiskNumber $targetDiskNumber -PartitionNumber $dataPartition.PartitionNumber
+                        $dataDriveLetter = $dataPartition.DriveLetter
+                    }
+
+                    if (-not $dataDriveLetter) {
+                        throw "Could not assign a drive letter to the data partition"
+                    }
+
+                    Format-Volume -DriveLetter $dataDriveLetter `
+                        -FileSystem NTFS `
+                        -NewFileSystemLabel "LINUX_DATA" `
+                        -Confirm:$false `
+                        -ErrorAction Stop
+
+                    Log-Message "Data partition created as ${dataDriveLetter}: (LINUX_DATA)"
                 }
-
-                if (-not $dataDriveLetter) {
-                    throw "Could not assign a drive letter to the data partition"
-                }
-
-                Format-Volume -DriveLetter $dataDriveLetter `
-                    -FileSystem NTFS `
-                    -NewFileSystemLabel "LINUX_DATA" `
-                    -Confirm:$false `
-                    -ErrorAction Stop
-
-                Log-Message "Data partition created as ${dataDriveLetter}: (LINUX_DATA)"
 
                 $script:NewDrive = "${dataDriveLetter}:"
                 $script:EfiDrive = "${efiDriveLetter}:"
@@ -2267,15 +2298,35 @@ exit
             $script:EfiDrive = "${driveLetter}:"
             $script:EfiLabel = $efiLabel
 
-            # Now create the data partition (NTFS) for the rest of the unallocated space
+            # Now create the data partition (NTFS) sized to fit the ISO
             Log-Message "Creating NTFS data partition..."
             Start-Sleep -Seconds 2
 
             try {
-                $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
-                    -UseMaximumSize `
-                    -AssignDriveLetter `
-                    -ErrorAction Stop
+                # Calculate the size needed for the data partition (ISO size + 500MB buffer)
+                $isoInfo = Get-Item $script:IsoPath -ErrorAction SilentlyContinue
+                if ($isoInfo) {
+                    $isoSizeBytes = $isoInfo.Length
+                    $bufferBytes = [int64](500MB)
+                    $dataPartitionSize = $isoSizeBytes + $bufferBytes
+
+                    # Round up to next MB for alignment
+                    $dataPartitionSize = [int64]([Math]::Ceiling($dataPartitionSize / 1MB) * 1MB)
+
+                    $dataSizeGB = [math]::Round($dataPartitionSize / 1GB, 2)
+                    Log-Message "ISO size: $([math]::Round($isoSizeBytes / 1GB, 2)) GB, creating data partition: $dataSizeGB GB"
+
+                    $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                        -Size $dataPartitionSize `
+                        -AssignDriveLetter `
+                        -ErrorAction Stop
+                } else {
+                    Log-Message "Warning: Could not determine ISO size, using maximum available space"
+                    $dataPartition = New-Partition -DiskNumber $targetDiskNumber `
+                        -UseMaximumSize `
+                        -AssignDriveLetter `
+                        -ErrorAction Stop
+                }
 
                 Start-Sleep -Seconds 2
                 $dataDriveLetter = $dataPartition.DriveLetter
@@ -2497,7 +2548,43 @@ exit
                 $result = robocopy @robocopyArgs
             }
 
-            # Now copy all files to the data partition
+            # Install uefi-ntfs driver chain for native UEFI NTFS boot support
+            Set-Status "Installing UEFI NTFS boot support..."
+            Log-Message "Installing uefi-ntfs driver chain..."
+
+            try {
+                # Create EFI/BOOT directory
+                $efiBootDir = Join-Path $script:EfiDrive "EFI\BOOT"
+                if (-not (Test-Path $efiBootDir)) {
+                    New-Item -Path $efiBootDir -ItemType Directory -Force | Out-Null
+                }
+
+                # Download custom uefi-ntfs BOOTx64.EFI
+                $bootx64Url = "https://github.com/ArchangelJTW/uefi-ntfs/releases/download/v1.0.0/bootx64.efi"
+                $bootx64Path = Join-Path $efiBootDir "BOOTx64.EFI"
+                Log-Message "Downloading uefi-ntfs BOOTx64.EFI..."
+                Invoke-WebRequest -Uri $bootx64Url -OutFile $bootx64Path -ErrorAction Stop
+                Log-Message "Downloaded BOOTx64.EFI"
+
+                # Download NTFS driver
+                $ntfsDriverUrl = "https://github.com/pbatard/efifs/releases/download/v1.11/ntfs_x64.efi"
+                $ntfsDriverPath = Join-Path $efiBootDir "ntfs_x64.efi"
+                Log-Message "Downloading NTFS driver..."
+                Invoke-WebRequest -Uri $ntfsDriverUrl -OutFile $ntfsDriverPath -ErrorAction Stop
+                Log-Message "Downloaded ntfs_x64.efi"
+
+                # Create uefi-ntfs.conf with the data partition label
+                $configPath = Join-Path $efiBootDir "uefi-ntfs.conf"
+                $dataLabel = $script:VolumeLabel
+                Set-Content -Path $configPath -Value $dataLabel -Encoding ASCII -Force
+                Log-Message "Created uefi-ntfs.conf with label: $dataLabel"
+
+                Log-Message "UEFI NTFS boot chain installed successfully!"
+            }
+            catch {
+                Log-Message "ERROR: Failed to install uefi-ntfs driver: $_" -Error
+                Log-Message "Falling back to standard GRUB boot..." -Error
+            }
             Log-Message "Copying all files to data partition $($script:NewDrive)..."
             $robocopyArgs = @(
                 $sourceDrive,
@@ -2520,119 +2607,10 @@ exit
 
             Log-Message "Files copied successfully!"
 
-            # Fix GRUB configuration to point to the data partition
-            Set-Status "Fixing GRUB configuration for split partition setup..."
-            Log-Message "Creating proper GRUB configuration for split partition boot..."
-
-            $dataLabel = $script:VolumeLabel
-            $efiLabel = $script:EfiLabel
-
-            # Find and patch all GRUB config files on both partitions
-            $configFiles = @()
-
-            # Search EFI partition for grub.cfg, grub.conf, isolinux.cfg
-            $efiConfigs = Get-ChildItem -Path $script:EfiDrive -Recurse -Include "*.cfg","*.conf" -ErrorAction SilentlyContinue
-            if ($efiConfigs) {
-                $configFiles += $efiConfigs
-            }
-
-            # Search data partition
-            $dataConfigs = Get-ChildItem -Path $script:NewDrive -Recurse -Include "*.cfg","*.conf" -ErrorAction SilentlyContinue
-            if ($dataConfigs) {
-                $configFiles += $dataConfigs
-            }
-
-            $patchedCount = 0
-            foreach ($cfgFile in $configFiles) {
-                try {
-                    $content = Get-Content $cfgFile.FullName -Raw -ErrorAction Stop
-                    $original = $content
-
-                    # Replace ALL label references with the data partition label
-                    # This ensures GRUB can find the kernel and initramfs on the NTFS partition
-
-                    # Root filesystem specifications (most important)
-                    $content = $content -replace '(root=live:LABEL=)[^\s\\]+', "`$1$dataLabel"
-                    $content = $content -replace '(root=live:CDLABEL=)[^\s\\]+', "`$1$dataLabel"
-                    $content = $content -replace '(root=LABEL=)[^\s\\]+', "`$1$dataLabel"
-                    $content = $content -replace '(root=/dev/disk/by-label/)[^\s]+', "`$1$dataLabel"
-
-                    # GRUB 'set root' commands - must point to partition with kernels
-                    $content = $content -replace "set root='[^']*'", "set root='$dataLabel'"
-                    $content = $content -replace 'set root="[^"]*"', "set root='$dataLabel'"
-
-                    # Fix search commands to find the data partition by label
-                    $content = $content -replace "(search\s+[^`\n]*--label\s+--set=root\s+)[^\s]+", "`$1$dataLabel"
-                    $content = $content -replace "(search\s+[^`\n]*-l\s+--set=root\s+)[^\s]+", "`$1$dataLabel"
-                    $content = $content -replace "(search\s+[^`\n]*--label\s+--set\s+)[^\s]+", "`$1$dataLabel"
-                    $content = $content -replace "(search\s+[^`\n]*-l\s+--set\s+)[^\s]+", "`$1$dataLabel"
-                    $content = $content -replace "(search\s+--no-floppy\s+--set=root\s+-l\s+)[^\s]+", "`$1$dataLabel"
-                    $content = $content -replace "(search\s+--no-floppy\s+--set=root\s+--label\s+)[^\s]+", "`$1$dataLabel"
-
-                    # Fedora/Bazzite/Atomic specific
-                    $content = $content -replace '(set isolabel=)[^\s]+', "`$1$dataLabel"
-                    $content = $content -replace '(CDLABEL=)[^\s\\]+', "`$1$dataLabel"
-
-                    # Ubuntu/Debian casper - ensure root is set
-                    if ($content -match 'boot=casper' -and $content -notmatch 'root=LABEL=') {
-                        $content = $content -replace '(linux\s+[^\s]+\s+)', "`$1root=LABEL=$dataLabel "
-                    }
-
-                    if ($content -ne $original) {
-                        Set-Content -Path $cfgFile.FullName -Value $content -Encoding UTF8 -Force
-                        $patchedCount++
-                        Log-Message "  Patched: $($cfgFile.Name)"
-                    }
-                }
-                catch {
-                    Log-Message "  Warning: Could not patch $($cfgFile.Name): $_" -Error
-                }
-            }
-
-            # If no config files found or patched, create a basic grub.cfg
-            if ($patchedCount -eq 0) {
-                Log-Message "No GRUB config files found. Creating a basic grub.cfg..."
-
-                $grubCfgPath = Join-Path $script:EfiDrive "EFI\BOOT\grub.cfg"
-                $grubCfgContent = @"
-# Auto-generated GRUB config for split partition boot
-# Data partition label: $dataLabel
-
-set timeout=10
-set default=0
-
-# Search for the data partition
-search --no-floppy --set=root --label $dataLabel
-
-menuentry "Boot from LINUX_DATA partition" {
-    search --no-floppy --set=root --label $dataLabel
-    echo "Loading kernel from LINUX_DATA partition..."
-    linux /vmlinuz root=LABEL=$dataLabel ro quiet splash
-    initrd /initrd.img
-}
-
-menuentry "Boot from LINUX_DATA (safe mode)" {
-    search --no-floppy --set=root --label $dataLabel
-    linux /vmlinuz root=LABEL=$dataLabel ro single
-    initrd /initrd.img
-}
-"@
-
-                try {
-                    Set-Content -Path $grubCfgPath -Value $grubCfgContent -Encoding UTF8 -Force
-                    Log-Message "Created basic grub.cfg at $grubCfgPath"
-                    $patchedCount++
-                }
-                catch {
-                    Log-Message "Failed to create grub.cfg: $_" -Error
-                }
-            }
-
-            if ($patchedCount -gt 0) {
-                Log-Message "Successfully configured GRUB to boot from data partition '$dataLabel'"
-            } else {
-                Log-Message "ERROR: Could not configure GRUB!" -Error
-            }
+            # Note: GRUB config patching is not needed when using uefi-ntfs driver chain
+            # The real bootloader from the ISO will run unmodified from the NTFS partition
+            Log-Message "UEFI-NTFS driver will chainload the real bootloader from NTFS partition"
+            Log-Message "No GRUB configuration changes needed"
 
             Log-Message "Removing read-only attributes from data partition..."
             Set-Status "Removing read-only attributes..."
